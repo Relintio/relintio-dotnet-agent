@@ -17,8 +17,11 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Build Project
+        run: dotnet build --configuration Release
+
       - name: Pack NuGet Package
-        run: dotnet pack --configuration Release
+        run: dotnet pack --configuration Release --no-build
 
       - name: Push to NuGet
         env:
