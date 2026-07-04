@@ -8,6 +8,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -24,6 +27,4 @@ jobs:
         run: dotnet pack --configuration Release --no-build
 
       - name: Push to NuGet
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
-        run: dotnet nuget push bin/Release/*.nupkg --api-key $NUGET_API_KEY --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push bin/Release/*.nupkg --source https://api.nuget.org/v3/index.json --skip-duplicate
