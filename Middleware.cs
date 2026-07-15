@@ -31,7 +31,7 @@ namespace Relintio
             var userAgent = context.Request.Headers["User-Agent"].ToString();
 
             var result = _agent.CheckRequest(ip, userAgent, path);
-            _agent.SendTelemetry(ip, userAgent, path, result);
+            _agent.QueueTelemetry(ip, userAgent, path, result);
 
             if (result.Action == "block")
             {

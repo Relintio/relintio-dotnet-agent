@@ -2,10 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Text;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace Relintio
@@ -13,8 +14,10 @@ namespace Relintio
     public class AgentConfig
     {
         public string LicenseKey { get; set; } = string.Empty;
-        public string ApiUrl { get; set; } = "https://api.relintio.com/api";
+        public string ApiUrl { get; set; } = "https://relintio.com/api";
+        public string Domain { get; set; } = string.Empty;
         public int SyncIntervalSeconds { get; set; } = 60;
+        public int RequestTimeoutSeconds { get; set; } = 10;
     }
 
     public class WafRule
@@ -47,26 +50,47 @@ namespace Relintio
         public string Action { get; set; } = "allow";
     }
 
-    public class Agent
+    public class Agent : IDisposable
     {
+        private const string AgentVersion = "0.1.7";
         private readonly AgentConfig _config;
         private readonly HttpClient _httpClient;
         private List<WafRule> _rules = new();
         private readonly ReaderWriterLockSlim _lock = new();
         private CancellationTokenSource? _cts;
+        private Task? _syncTask;
+        private readonly CancellationTokenSource _lifetime = new();
+        private readonly Channel<TelemetryItem> _telemetry;
+        private readonly Task _telemetryTask;
+
+        private sealed record TelemetryItem(string Ip, string UserAgent, string Path, WafResult Result);
 
         public Agent(AgentConfig config)
         {
             _config = config;
-            _httpClient = new HttpClient();
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", _config.LicenseKey);
+            _httpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(Math.Max(1, _config.RequestTimeoutSeconds))
+            };
             _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            _telemetry = Channel.CreateBounded<TelemetryItem>(new BoundedChannelOptions(1024)
+            {
+                FullMode = BoundedChannelFullMode.DropWrite,
+                SingleReader = true,
+                SingleWriter = false
+            });
+            _telemetryTask = Task.Run(ProcessTelemetryAsync);
         }
 
         public void StartSync()
         {
-            _cts = new CancellationTokenSource();
-            Task.Run(() => SyncLoop(_cts.Token));
+            if (_syncTask is { IsCompleted: false })
+            {
+                return;
+            }
+
+            _cts = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+            _syncTask = Task.Run(() => SyncLoop(_cts.Token));
         }
 
         public void StopSync()
@@ -80,24 +104,40 @@ namespace Relintio
             {
                 try
                 {
-                    await SyncRulesAsync();
+                    await SyncRulesAsync(token);
                 }
-                catch
+                catch when (!token.IsCancellationRequested)
                 {
                     // Fail-open
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(_config.SyncIntervalSeconds), token);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, _config.SyncIntervalSeconds)), token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
             }
         }
 
-        public async Task SyncRulesAsync()
+        public async Task SyncRulesAsync(CancellationToken cancellationToken = default)
         {
-            var url = $"{_config.ApiUrl.TrimEnd('/')}/rules/sync";
-            var response = await _httpClient.GetAsync(url);
+            var url = $"{_config.ApiUrl.TrimEnd('/')}/agent/verify";
+            var payload = new
+            {
+                license_key = _config.LicenseKey,
+                domain = _config.Domain,
+                protocol_version = 1,
+                agent_kind = "dotnet",
+                agent_version = AgentVersion,
+                capabilities = new[] { "custom_rules", "telemetry" }
+            };
+            using var response = await _httpClient.PostAsJsonAsync(url, payload, cancellationToken);
             if (response.IsSuccessStatusCode)
             {
-                var json = await response.Content.ReadAsStringAsync();
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
                 var data = JsonSerializer.Deserialize<SyncResponse>(json);
                 if (data != null)
                 {
@@ -169,31 +209,51 @@ namespace Relintio
             }
         }
 
-        public void SendTelemetry(string ip, string userAgent, string path, WafResult result)
+        public async Task SendTelemetryAsync(string ip, string userAgent, string path, WafResult result, CancellationToken cancellationToken = default)
         {
-            Task.Run(async () =>
+            try
             {
-                try
+                var url = $"{_config.ApiUrl.TrimEnd('/')}/agent/log";
+                var payload = new
                 {
-                    var url = $"{_config.ApiUrl.TrimEnd('/')}/telemetry/log";
-                    var payload = new
-                    {
-                        ip = ip,
-                        user_agent = userAgent,
-                        path = path,
-                        score = result.Score,
-                        action = result.Action,
-                        timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                    };
+                    license_key = _config.LicenseKey,
+                    ip,
+                    user_agent = userAgent,
+                    path,
+                    risk_score = Math.Clamp(result.Score, 0, 100),
+                    action = result.Action.ToUpperInvariant(),
+                    reason_code = "sdk_rule",
+                    protocol_version = 1,
+                    agent_kind = "dotnet",
+                    agent_version = AgentVersion
+                };
 
-                    var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-                    await _httpClient.PostAsync(url, content);
-                }
-                catch
+                using var response = await _httpClient.PostAsJsonAsync(url, payload, cancellationToken);
+            }
+            catch when (!cancellationToken.IsCancellationRequested)
+            {
+                // Fail-open
+            }
+        }
+
+        public void QueueTelemetry(string ip, string userAgent, string path, WafResult result)
+        {
+            _telemetry.Writer.TryWrite(new TelemetryItem(ip, userAgent, path, result));
+        }
+
+        private async Task ProcessTelemetryAsync()
+        {
+            try
+            {
+                await foreach (var item in _telemetry.Reader.ReadAllAsync(_lifetime.Token))
                 {
-                    // Fail-open
+                    await SendTelemetryAsync(item.Ip, item.UserAgent, item.Path, item.Result, _lifetime.Token);
                 }
-            });
+            }
+            catch (OperationCanceledException)
+            {
+                // Normal shutdown
+            }
         }
 
         private bool MatchValue(string value, string pattern, string condition)
@@ -207,6 +267,25 @@ namespace Relintio
                 "contains" => value.Contains(pattern, StringComparison.OrdinalIgnoreCase),
                 _ => value.Contains(pattern, StringComparison.OrdinalIgnoreCase)
             };
+        }
+
+        public void Dispose()
+        {
+            StopSync();
+            _telemetry.Writer.TryComplete();
+            _lifetime.Cancel();
+            try
+            {
+                Task.WhenAll(_syncTask ?? Task.CompletedTask, _telemetryTask).Wait(TimeSpan.FromSeconds(2));
+            }
+            catch
+            {
+                // Best-effort shutdown
+            }
+            _cts?.Dispose();
+            _lifetime.Dispose();
+            _lock.Dispose();
+            _httpClient.Dispose();
         }
     }
 }

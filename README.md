@@ -37,7 +37,8 @@ var app = builder.Build();
 var agent = new Agent(new AgentConfig
 {
     LicenseKey = "YOUR_LICENSE_KEY",
-    ApiUrl = "https://api.relintio.com/api",
+    Domain = "example.com",
+    ApiUrl = "https://relintio.com/api",
     SyncIntervalSeconds = 60
 });
 agent.StartSync();
