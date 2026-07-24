@@ -14,9 +14,9 @@ namespace Relintio
     public class AgentConfig
     {
         public string LicenseKey { get; set; } = string.Empty;
-        public string ApiUrl { get; set; } = "https://relintio.com/api";
+        public string ApiUrl { get; set; } = "https://api.relintio.com/v1";
         public string Domain { get; set; } = string.Empty;
-        public int SyncIntervalSeconds { get; set; } = 60;
+        public int SyncIntervalSeconds { get; set; } = 10;
         public int RequestTimeoutSeconds { get; set; } = 10;
     }
 
@@ -100,20 +100,26 @@ namespace Relintio
 
         private async Task SyncLoop(CancellationToken token)
         {
+            var failures = 0;
             while (!token.IsCancellationRequested)
             {
+                var success = false;
                 try
                 {
-                    await SyncRulesAsync(token);
+                    success = await SyncRulesInternalAsync(token);
                 }
                 catch when (!token.IsCancellationRequested)
                 {
                     // Fail-open
                 }
 
+                failures = success ? 0 : Math.Min(failures + 1, 5);
+                var baseDelay = Math.Min(300, Math.Max(10, _config.SyncIntervalSeconds) * (1 << failures));
+                var delay = Math.Max(8, (int)Math.Round(baseDelay * (0.8 + Random.Shared.NextDouble() * 0.4)));
+
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, _config.SyncIntervalSeconds)), token);
+                    await Task.Delay(TimeSpan.FromSeconds(delay), token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -123,6 +129,11 @@ namespace Relintio
         }
 
         public async Task SyncRulesAsync(CancellationToken cancellationToken = default)
+        {
+            await SyncRulesInternalAsync(cancellationToken);
+        }
+
+        private async Task<bool> SyncRulesInternalAsync(CancellationToken cancellationToken)
         {
             var url = $"{_config.ApiUrl.TrimEnd('/')}/agent/verify";
             var payload = new
@@ -151,7 +162,10 @@ namespace Relintio
                         _lock.ExitWriteLock();
                     }
                 }
+                return true;
             }
+
+            return false;
         }
 
         public WafResult CheckRequest(string ip, string userAgent, string path)

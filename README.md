@@ -10,6 +10,15 @@ Install the package via NuGet:
 dotnet add package Relintio.Agent
 ```
 
+## Dashboard Deployment Workflow
+
+1. Open **Dashboard → Deployment**, select **.NET**, and download the prepared ASP.NET Core starter.
+2. Register the Relintio middleware before mapping protected endpoints.
+3. Restart the service, then open one public HTTP endpoint.
+4. Enter that exact URL or public IP endpoint in Relintio and select **Verify target**.
+
+The SDK reports runtime kind `dotnet` and its version during rule synchronization. Policy revisions are received automatically.
+
 Or via the Package Manager Console:
 
 ```powershell
@@ -38,8 +47,8 @@ var agent = new Agent(new AgentConfig
 {
     LicenseKey = "YOUR_LICENSE_KEY",
     Domain = "example.com",
-    ApiUrl = "https://relintio.com/api",
-    SyncIntervalSeconds = 60
+    ApiUrl = "https://api.relintio.com/v1",
+    SyncIntervalSeconds = 10
 });
 agent.StartSync();
 
