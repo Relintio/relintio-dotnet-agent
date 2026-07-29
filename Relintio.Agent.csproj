@@ -19,6 +19,13 @@
     <None Include="README.md" Pack="true" PackagePath="\"/>
   </ItemGroup>
 
+  <!-- The default glob is rooted at this directory, so without this the test
+       project's sources would also be compiled into the shipped package. -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
